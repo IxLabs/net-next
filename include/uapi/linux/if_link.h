@@ -320,6 +320,32 @@ struct ifla_vxlan_port_range {
 	__be16	high;
 };
 
+/* NVGRE section */
+enum {
+	IFLA_NVGRE_UNSPEC,
+	IFLA_NVGRE_ID,
+	IFLA_NVGRE_GROUP,	/* group or remote address */
+	IFLA_NVGRE_LINK,
+	IFLA_NVGRE_LOCAL,
+	IFLA_NVGRE_TTL,
+	IFLA_NVGRE_TOS,
+	IFLA_NVGRE_LEARNING,
+	IFLA_NVGRE_AGEING,
+	IFLA_NVGRE_LIMIT,
+	IFLA_NVGRE_PORT_RANGE,	/* source port */
+	IFLA_NVGRE_PROXY,
+	IFLA_NVGRE_RSC,
+	IFLA_NVGRE_L2MISS,
+	IFLA_NVGRE_L3MISS,
+	IFLA_NVGRE_PORT,	/* destination port */
+	__IFLA_NVGRE_MAX
+};
+#define IFLA_NVGRE_MAX	(__IFLA_NVGRE_MAX - 1)
+
+struct ifla_nvgre_port_range {
+	__be16	low;
+	__be16	high;
+};
 /* SR-IOV virtual function management section */
 
 enum {

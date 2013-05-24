@@ -6,7 +6,8 @@
 
 #define GREPROTO_CISCO		0
 #define GREPROTO_PPTP		1
-#define GREPROTO_MAX		2
+#define GREPROTO_NV		2
+#define GREPROTO_MAX		3
 
 struct gre_protocol {
 	int  (*handler)(struct sk_buff *skb);
