@@ -239,19 +239,6 @@ errout:
 		rtnl_set_sk_err(net, RTNLGRP_NEIGH, err);
 }
 
-static void nvgre_ip_miss(struct net_device *dev, __be32 ipa)
-{
-	struct nvgre_dev *nvgre = netdev_priv(dev);
-	struct nvgre_fdb f;
-
-	memset(&f, 0, sizeof f);
-	f.state = NUD_STALE;
-	f.remote.remote_ip = ipa; /* goes to NDA_DST */
-	f.remote.remote_vni = NVGRE_N_VID;
-
-	nvgre_fdb_notify(nvgre, &f, RTM_GETNEIGH);
-}
-
 static void nvgre_fdb_miss(struct nvgre_dev *nvgre, const u8 eth_addr[ETH_ALEN])
 {
 	struct nvgre_fdb	f;
@@ -647,18 +634,16 @@ static int nvgre_rcv(struct sk_buff *skb)
 	if (!pskb_may_pull(skb, sizeof(*grehdr)))
 		goto drop;
 
-	grehdr = skb->data;
+	grehdr = (struct nvgrehdr*)skb->data;
 	vsn = htonl(grehdr->nv_key << 8) & 0xffffff;
 
 	__skb_pull(skb, sizeof(struct nvgrehdr));
 
-	printk(KERN_CRIT "nvgre_rcv packet, vsn=%d\n", vsn);
 	nvgre = nvgre_find_vni(&init_net, vsn);
 	if (!nvgre) {
 		netdev_dbg(skb->dev, "unknown vni %d\n", vsn);
 		goto drop;
 	}
-	printk(KERN_CRIT "found nvgre device for vni %d\n", vsn);
 
 	if (!pskb_may_pull(skb, ETH_HLEN)) {
 		nvgre->dev->stats.rx_length_errors++;
@@ -713,223 +698,10 @@ static int nvgre_rcv(struct sk_buff *skb)
 	u64_stats_update_end(&stats->syncp);
 
 	netif_rx(skb);
-	printk(KERN_CRIT "netif_rx done\n");
 	return NET_RX_SUCCESS;
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
-}
-#if 0
-/* Callback from net/ipv4/udp.c to receive packets */
-static int nvgre_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
-{
-	struct iphdr *oip;
-	struct nvgrehdr *vxh;
-	struct nvgre_dev *nvgre;
-	struct pcpu_tstats *stats;
-	__u32 vni;
-	int err;
-
-	/* pop off outer UDP header */
-	__skb_pull(skb, sizeof(struct udphdr));
-
-	/* Need nvgre and inner Ethernet header to be present */
-	if (!pskb_may_pull(skb, sizeof(struct nvgrehdr)))
-		goto error;
-
-	/* Drop packets with reserved bits set */
-	vxh = (struct nvgrehdr *) skb->data;
-	if (vxh->nv_flags != htonl(NVGRE_FLAGS) ||
-	    (vxh->nv_key & htonl(0xff))) {
-		netdev_dbg(skb->dev, "invalid nvgre flags=%#x vni=%#x\n",
-			   ntohl(vxh->nv_flags), ntohl(vxh->nv_key));
-		goto error;
-	}
-
-	__skb_pull(skb, sizeof(struct nvgrehdr));
-
-	/* Is this VNI defined? */
-	vni = ntohl(vxh->nv_key) >> 8;
-	nvgre = nvgre_find_vni(sock_net(sk), vni);
-	if (!nvgre) {
-		netdev_dbg(skb->dev, "unknown vni %d\n", vni);
-		goto drop;
-	}
-
-	if (!pskb_may_pull(skb, ETH_HLEN)) {
-		nvgre->dev->stats.rx_length_errors++;
-		nvgre->dev->stats.rx_errors++;
-		goto drop;
-	}
-
-	skb_reset_mac_header(skb);
-
-	/* Re-examine inner Ethernet packet */
-	oip = ip_hdr(skb);
-	skb->protocol = eth_type_trans(skb, nvgre->dev);
-
-	/* Ignore packet loops (and multicast echo) */
-	if (compare_ether_addr(eth_hdr(skb)->h_source,
-			       nvgre->dev->dev_addr) == 0)
-		goto drop;
-
-	if (nvgre->flags & NVGRE_F_LEARN)
-		nvgre_snoop(skb->dev, oip->saddr, eth_hdr(skb)->h_source);
-
-	__skb_tunnel_rx(skb, nvgre->dev);
-	skb_reset_network_header(skb);
-
-	/* If the NIC driver gave us an encapsulated packet with
-	 * CHECKSUM_UNNECESSARY and Rx checksum feature is enabled,
-	 * leave the CHECKSUM_UNNECESSARY, the device checksummed it
-	 * for us. Otherwise force the upper layers to verify it.
-	 */
-	if (skb->ip_summed != CHECKSUM_UNNECESSARY || !skb->encapsulation ||
-	    !(nvgre->dev->features & NETIF_F_RXCSUM))
-		skb->ip_summed = CHECKSUM_NONE;
-
-	skb->encapsulation = 0;
-
-	err = IP_ECN_decapsulate(oip, skb);
-	if (unlikely(err)) {
-		if (log_ecn_error)
-			net_info_ratelimited("non-ECT from %pI4 with TOS=%#x\n",
-					     &oip->saddr, oip->tos);
-		if (err > 1) {
-			++nvgre->dev->stats.rx_frame_errors;
-			++nvgre->dev->stats.rx_errors;
-			goto drop;
-		}
-	}
-
-	stats = this_cpu_ptr(nvgre->dev->tstats);
-	u64_stats_update_begin(&stats->syncp);
-	stats->rx_packets++;
-	stats->rx_bytes += skb->len;
-	u64_stats_update_end(&stats->syncp);
-
-	netif_rx(skb);
-
-	return 0;
-error:
-	/* Put UDP header back */
-	__skb_push(skb, sizeof(struct udphdr));
-
-	return 1;
-drop:
-	/* Consume bad packet */
-	kfree_skb(skb);
-	return 0;
-}
-#endif
-static int arp_reduce(struct net_device *dev, struct sk_buff *skb)
-{
-	struct nvgre_dev *nvgre = netdev_priv(dev);
-	struct arphdr *parp;
-	u8 *arpptr, *sha;
-	__be32 sip, tip;
-	struct neighbour *n;
-
-	if (dev->flags & IFF_NOARP)
-		goto out;
-
-	if (!pskb_may_pull(skb, arp_hdr_len(dev))) {
-		dev->stats.tx_dropped++;
-		goto out;
-	}
-	parp = arp_hdr(skb);
-
-	if ((parp->ar_hrd != htons(ARPHRD_ETHER) &&
-	     parp->ar_hrd != htons(ARPHRD_IEEE802)) ||
-	    parp->ar_pro != htons(ETH_P_IP) ||
-	    parp->ar_op != htons(ARPOP_REQUEST) ||
-	    parp->ar_hln != dev->addr_len ||
-	    parp->ar_pln != 4)
-		goto out;
-	arpptr = (u8 *)parp + sizeof(struct arphdr);
-	sha = arpptr;
-	arpptr += dev->addr_len;	/* sha */
-	memcpy(&sip, arpptr, sizeof(sip));
-	arpptr += sizeof(sip);
-	arpptr += dev->addr_len;	/* tha */
-	memcpy(&tip, arpptr, sizeof(tip));
-
-	if (ipv4_is_loopback(tip) ||
-	    ipv4_is_multicast(tip))
-		goto out;
-
-	n = neigh_lookup(&arp_tbl, &tip, dev);
-
-	if (n) {
-		struct nvgre_fdb *f;
-		struct sk_buff	*reply;
-
-		if (!(n->nud_state & NUD_CONNECTED)) {
-			neigh_release(n);
-			goto out;
-		}
-
-		f = nvgre_find_mac(nvgre, n->ha);
-		if (f && f->remote.remote_ip == htonl(INADDR_ANY)) {
-			/* bridge-local neighbor */
-			neigh_release(n);
-			goto out;
-		}
-
-		reply = arp_create(ARPOP_REPLY, ETH_P_ARP, sip, dev, tip, sha,
-				n->ha, sha);
-
-		neigh_release(n);
-
-		skb_reset_mac_header(reply);
-		__skb_pull(reply, skb_network_offset(reply));
-		reply->ip_summed = CHECKSUM_UNNECESSARY;
-		reply->pkt_type = PACKET_HOST;
-
-		if (netif_rx_ni(reply) == NET_RX_DROP)
-			dev->stats.rx_dropped++;
-	} else if (nvgre->flags & NVGRE_F_L3MISS)
-		nvgre_ip_miss(dev, tip);
-out:
-	consume_skb(skb);
-	return NETDEV_TX_OK;
-}
-
-static bool route_shortcircuit(struct net_device *dev, struct sk_buff *skb)
-{
-	struct nvgre_dev *nvgre = netdev_priv(dev);
-	struct neighbour *n;
-	struct iphdr *pip;
-
-	if (is_multicast_ether_addr(eth_hdr(skb)->h_dest))
-		return false;
-
-	n = NULL;
-	switch (ntohs(eth_hdr(skb)->h_proto)) {
-	case ETH_P_IP:
-		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-			return false;
-		pip = ip_hdr(skb);
-		n = neigh_lookup(&arp_tbl, &pip->daddr, dev);
-		break;
-	default:
-		return false;
-	}
-
-	if (n) {
-		bool diff;
-
-		diff = compare_ether_addr(eth_hdr(skb)->h_dest, n->ha) != 0;
-		if (diff) {
-			memcpy(eth_hdr(skb)->h_source, eth_hdr(skb)->h_dest,
-				dev->addr_len);
-			memcpy(eth_hdr(skb)->h_dest, n->ha, dev->addr_len);
-		}
-		neigh_release(n);
-		return diff;
-	} else if (nvgre->flags & NVGRE_F_L3MISS)
-		nvgre_ip_miss(dev, pip->daddr);
-	return false;
 }
 
 static void nvgre_sock_free(struct sk_buff *skb)
@@ -995,7 +767,7 @@ static void nvgre_encap_bypass(struct sk_buff *skb, struct nvgre_dev *src_nvgre,
 }
 
 static netdev_tx_t nvgre_xmit_one(struct sk_buff *skb, struct net_device *dev,
-				  struct nvgre_rdst *rdst, bool did_rsc)
+				  struct nvgre_rdst *rdst)
 {
 	struct nvgre_dev *nvgre = netdev_priv(dev);
 	struct rtable *rt;
@@ -1011,14 +783,8 @@ static netdev_tx_t nvgre_xmit_one(struct sk_buff *skb, struct net_device *dev,
 	vni = rdst->remote_vni;
 	dst = rdst->remote_ip;
 
-	printk(KERN_CRIT "nvgre xmit one vni=%d remote_ip=%pI4\n", vni, &dst);
 
 	if (!dst) {
-		if (did_rsc) {
-			/* short-circuited back to local bridge */
-			nvgre_encap_bypass(skb, nvgre, nvgre);
-			return NETDEV_TX_OK;
-		}
 		goto drop;
 	}
 
@@ -1030,7 +796,6 @@ static netdev_tx_t nvgre_xmit_one(struct sk_buff *skb, struct net_device *dev,
 	/* Need space for new headers (invalidates iph ptr) */
 	if (skb_cow_head(skb, NVGRE_HEADROOM))
 		goto drop;
-	printk(KERN_CRIT "cow head\n");
 
 	old_iph = ip_hdr(skb);
 
@@ -1051,19 +816,16 @@ static netdev_tx_t nvgre_xmit_one(struct sk_buff *skb, struct net_device *dev,
 	rt = ip_route_output_key(dev_net(dev), &fl4);
 	if (IS_ERR(rt)) {
 		netdev_dbg(dev, "no route to %pI4\n", &dst);
-		printk(KERN_CRIT "no route to %pI4 oif %d\n", &dst, rdst->remote_ifindex);
 		dev->stats.tx_carrier_errors++;
 		goto tx_error;
 	}
 
 	if (rt->dst.dev == dev) {
 		netdev_dbg(dev, "circular route to %pI4\n", &dst);
-		printk(KERN_CRIT "circular route\n");
 		ip_rt_put(rt);
 		dev->stats.collisions++;
 		goto tx_error;
 	}
-	printk(KERN_CRIT "before bypass\n");
 
 	/* Bypass encapsulation if the destination is local */
 	if (rt->rt_flags & RTCF_LOCAL &&
@@ -1106,11 +868,9 @@ static netdev_tx_t nvgre_xmit_one(struct sk_buff *skb, struct net_device *dev,
 
 	nvgre_set_owner(dev, skb);
 
-	printk(KERN_CRIT "offload\n");
 	if (handle_offloads(skb))
 		goto drop;
 
-	printk(KERN_CRIT "xmiting ok\n");
 	iptunnel_xmit(skb, dev);
 	return NETDEV_TX_OK;
 
@@ -1135,7 +895,6 @@ static netdev_tx_t nvgre_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct nvgre_dev *nvgre = netdev_priv(dev);
 	struct ethhdr *eth;
-	bool did_rsc = false;
 	struct nvgre_rdst *rdst0, *rdst;
 	struct nvgre_fdb *f;
 	int rc1, rc;
@@ -1143,21 +902,7 @@ static netdev_tx_t nvgre_xmit(struct sk_buff *skb, struct net_device *dev)
 	skb_reset_mac_header(skb);
 	eth = eth_hdr(skb);
 
-	printk(KERN_CRIT "nvgre xmit\n");
-
-	//if ((nvgre->flags & NVGRE_F_PROXY) && ntohs(eth->h_proto) == ETH_P_ARP)
-	//	return arp_reduce(dev, skb);
-
 	f = nvgre_find_mac(nvgre, eth->h_dest);
-	did_rsc = false;
-	printk(KERN_CRIT "f = %p\n", f);
-	//if (f && (f->flags & NTF_ROUTER) && (nvgre->flags & NVGRE_F_RSC) &&
-	//    ntohs(eth->h_proto) == ETH_P_IP) {
-	//	did_rsc = route_shortcircuit(dev, skb);
-	//	if (did_rsc)
-	//		f = nvgre_find_mac(nvgre, eth->h_dest);
-	//}
-
 	if (f == NULL) {
 		rdst0 = &nvgre->default_dst;
 
@@ -1175,12 +920,12 @@ static netdev_tx_t nvgre_xmit(struct sk_buff *skb, struct net_device *dev)
 		struct sk_buff *skb1;
 
 		skb1 = skb_clone(skb, GFP_ATOMIC);
-		rc1 = nvgre_xmit_one(skb1, dev, rdst, did_rsc);
+		rc1 = nvgre_xmit_one(skb1, dev, rdst);
 		if (rc == NETDEV_TX_OK)
 			rc = rc1;
 	}
 
-	rc1 = nvgre_xmit_one(skb, dev, rdst0, did_rsc);
+	rc1 = nvgre_xmit_one(skb, dev, rdst0);
 	if (rc == NETDEV_TX_OK)
 		rc = rc1;
 	return rc;
